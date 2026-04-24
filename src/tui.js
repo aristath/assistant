@@ -1,7 +1,9 @@
-import { createWriteStream } from "node:fs";
+import { createWriteStream, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import blessed from "blessed";
-import { loadConfig } from "./config.js";
-import { init, sendMessage, runWorkflow, getActiveRun, getActiveRuns, getStatus, shutdown, setRunRegisteredCallback } from "./opencode.js";
+import { loadConfig, getWorkflowsDir } from "./config.js";
+import { init, sendMessage, runWorkflow, getActiveRun, getActiveRuns, getStatus, shutdown, setRunRegisteredCallback, initBuilderSession, sendBuilderMessage, closeBuilderSession } from "./opencode.js";
 import { initScheduler, scheduleWorkflow, unscheduleWorkflow } from "./scheduler.js";
 import { listWorkflows, getWorkflow, saveWorkflow, deleteWorkflow, listRuns, watchWorkflows } from "./workflows.js";
 
@@ -51,6 +53,7 @@ let outputText = "";
 let isStreaming = false;
 let blinkOn = true;
 let autoScroll = true;
+let builderMode = false;
 
 // ─── Main view ────────────────────────────────────────────────────────────────
 
@@ -103,7 +106,7 @@ function clearOutput() {
 
 // ─── Menu ─────────────────────────────────────────────────────────────────────
 
-const MENU_ITEMS = ["  New Chat", "  Continue Chat", "  Workflows", "  Logs", "  Quit"];
+const MENU_ITEMS = ["  New Chat", "  Continue Chat", "  Workflows", "  Build Workflow", "  Logs", "  Quit"];
 
 const menuBox = blessed.list({
   top: "center", left: "center", width: 32, height: MENU_ITEMS.length + 2,
@@ -215,6 +218,47 @@ function showMain() {
   wfView.hide(); logsView.hide(); menuBox.hide();
   inputBar.focus();
   screen.render();
+}
+
+async function enterBuilderMode() {
+  menuBox.hide();
+  activeView = "main";
+  outputBox.show(); inputBar.show();
+  wfView.hide(); logsView.hide();
+
+  clearOutput();
+  builderMode = true;
+  appendOutput("─── Workflow Builder ───\n");
+  appendOutput("Chat with the assistant to create or edit workflows and agents.\n");
+  appendOutput("[Esc] to exit builder mode.\n\n");
+  isStreaming = true;
+
+  try {
+    const skillPath = join(new URL(".", import.meta.url).pathname, "..", "skills", "workflow-builder", "SKILL.md");
+    let skillContent = readFileSync(skillPath, "utf-8");
+    const wfDir = getWorkflowsDir();
+    const agentsDir = join(homedir(), ".config", "opencode", "agents");
+    skillContent = skillContent
+      .replace(/\{\{WORKFLOWS_DIR\}\}/g, wfDir)
+      .replace(/\{\{AGENTS_DIR\}\}/g, agentsDir);
+    await initBuilderSession(skillContent);
+    appendOutput("Ready. What would you like to build?\n\n");
+  } catch (err) {
+    appendOutput(`[error] Could not start builder: ${err.message}\n\n`);
+    builderMode = false;
+  } finally {
+    isStreaming = false;
+    renderOutput();
+    inputBar.focus();
+  }
+}
+
+async function exitBuilderMode() {
+  builderMode = false;
+  await closeBuilderSession();
+  appendOutput("\n─── Exited builder mode ───\n\n");
+  renderOutput();
+  inputBar.focus();
 }
 
 function showMenu() {
@@ -743,7 +787,7 @@ async function runCurrentWorkflow() {
   isStreaming = true;
 
   try {
-    for await (const delta of streamText(runWorkflow(editingSlug, wf.body))) {
+    for await (const delta of streamText(runWorkflow(editingSlug, wf.body, { agent: wf.agent, tools: wf.tools }))) {
       appendOutput(delta);
     }
     appendOutput("\n\n─── Done ───\n\n");
@@ -848,6 +892,7 @@ logsList.on("select", (_, idx) => {
 
 screen.key("escape", () => {
   if (suppressNextEscape) { suppressNextEscape = false; return; }
+  if (builderMode) { exitBuilderMode(); return; }
   if (activeView === "main") showMenu();
   else if (activeView === "menu") hideMenu();
   else if (activeView === "workflows" || activeView === "logs") showMain();
@@ -855,11 +900,12 @@ screen.key("escape", () => {
 
 menuBox.on("select", async (_, idx) => {
   switch (idx) {
-    case 0: clearOutput(); showMain(); break;
+    case 0: clearOutput(); builderMode = false; closeBuilderSession(); showMain(); break;
     case 1: hideMenu(); break;
     case 2: await showWorkflows(); break;
-    case 3: await showLogs(); break;
-    case 4: shutdown(); process.exit(0);
+    case 3: await enterBuilderMode(); break;
+    case 4: await showLogs(); break;
+    case 5: shutdown(); process.exit(0);
   }
 });
 
@@ -877,7 +923,8 @@ inputBar.key("enter", async () => {
   isStreaming = true;
 
   try {
-    for await (const delta of streamText(sendMessage(msg))) {
+    const source = builderMode ? sendBuilderMessage(msg) : sendMessage(msg);
+    for await (const delta of streamText(source)) {
       appendOutput(delta);
     }
     appendOutput("\n\n");

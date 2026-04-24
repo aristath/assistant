@@ -43,7 +43,7 @@ async function executeWorkflow(slug) {
   const events = [];
 
   try {
-    for await (const event of runWorkflow(slug, wf.body)) {
+    for await (const event of runWorkflow(slug, wf.body, { agent: wf.agent, tools: wf.tools })) {
       events.push(event);
     }
     const output = collectText(events);

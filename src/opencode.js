@@ -201,7 +201,7 @@ export function getActiveRuns() {
  * Run a workflow in a dedicated session. Yields events like sendMessage.
  * Broadcasts each event on a per-run EventEmitter so /live subscribers receive it.
  */
-export async function* runWorkflow(slug, body) {
+export async function* runWorkflow(slug, body, { agent, tools } = {}) {
   if (!client) throw new Error("OpenCode not initialized");
   if (activeRuns.has(slug)) throw new Error(`Workflow "${slug}" is already running`);
 
@@ -228,9 +228,13 @@ export async function* runWorkflow(slug, body) {
   bus.on("event", onEvent);
 
   try {
+    const promptBody = { parts: [{ type: "text", text: body }] };
+    if (agent) promptBody.agent = agent;
+    if (tools) promptBody.tools = tools;
+
     const promptResult = await client.session.promptAsync({
       path: { id: ws.id },
-      body: { parts: [{ type: "text", text: body }] },
+      body: promptBody,
     });
 
     if (promptResult.error) {
@@ -266,6 +270,91 @@ export async function* runWorkflow(slug, body) {
     emitter.emit("done");
     try { await client.session.delete({ path: { id: ws.id } }); } catch { /* best effort */ }
   }
+}
+
+// ─── Builder session ─────────────────────────────────────────────────────────
+
+let builderSession = null;
+
+export async function initBuilderSession(skillContent) {
+  if (!client) throw new Error("OpenCode not initialized");
+  if (builderSession) {
+    try { await client.session.delete({ path: { id: builderSession.id } }); } catch { /* best effort */ }
+  }
+  const result = await client.session.create();
+  builderSession = result.data;
+
+  // Prime the session with the skill instructions (no reply needed)
+  await client.session.promptAsync({
+    path: { id: builderSession.id },
+    body: {
+      parts: [{ type: "text", text: skillContent }],
+      noReply: true,
+      tools: { edit: true, bash: false, webfetch: false },
+    },
+  });
+
+  console.log("[opencode] Builder session created:", builderSession.id);
+}
+
+export async function* sendBuilderMessage(message) {
+  if (!client || !builderSession) throw new Error("Builder session not initialized");
+
+  const queue = [];
+  let notify = null;
+
+  function onEvent(event) {
+    if (event?.properties?.sessionID !== builderSession.id) return;
+    queue.push(event);
+    const resolve = notify;
+    notify = null;
+    resolve?.();
+  }
+
+  bus.on("event", onEvent);
+
+  try {
+    const result = await client.session.promptAsync({
+      path: { id: builderSession.id },
+      body: {
+        parts: [{ type: "text", text: message }],
+        tools: { edit: true, bash: false, webfetch: false },
+      },
+    });
+
+    if (result.error) throw new Error(`Prompt failed: ${JSON.stringify(result.error)}`);
+
+    let done = false;
+    while (!done) {
+      while (queue.length > 0) {
+        const event = queue.shift();
+        yield event;
+
+        if (
+          event?.type === "session.idle" ||
+          event?.type === "session.error" ||
+          (event?.type === "message.updated" &&
+            event?.properties?.info?.role === "assistant" &&
+            event?.properties?.info?.time?.completed)
+        ) {
+          done = true;
+          break;
+        }
+      }
+      if (!done && queue.length === 0) {
+        await new Promise((r) => { notify = r; });
+      }
+    }
+  } finally {
+    bus.off("event", onEvent);
+    notify = null;
+  }
+}
+
+export async function closeBuilderSession() {
+  if (!client || !builderSession) return;
+  try { await client.session.delete({ path: { id: builderSession.id } }); } catch { /* best effort */ }
+  builderSession = null;
 }
 
 // ─── Status / lifecycle ──────────────────────────────────────────────────────

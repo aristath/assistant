@@ -24,12 +24,17 @@ function parse(slug, raw) {
     description: data.description ?? "",
     cron: data.cron ?? null,
     enabled: data.enabled ?? false,
+    agent: data.agent ?? null,
+    tools: data.tools ?? null,
     body: content.trim(),
   };
 }
 
-function serialize({ title, description, cron, enabled, body }) {
-  return matter.stringify(body ?? "", { title, description, cron, enabled });
+function serialize({ title, description, cron, enabled, agent, tools, body }) {
+  const fm = { title, description, cron, enabled };
+  if (agent) fm.agent = agent;
+  if (tools) fm.tools = tools;
+  return matter.stringify(body ?? "", fm);
 }
 
 // ─── CRUD ────────────────────────────────────────────────────────────────────
