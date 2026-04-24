@@ -1,0 +1,16 @@
+{
+  "name": "assistant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node src/tui.js"
+  },
+  "dependencies": {
+    "@opencode-ai/sdk": "^1.4.7",
+    "blessed": "^0.1.81",
+    "chokidar": "^5.0.0",
+    "gray-matter": "^4.0.3",
+    "node-cron": "^4.2.1"
+  }
+}
